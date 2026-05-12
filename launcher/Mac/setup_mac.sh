@@ -38,14 +38,19 @@ echo
 #-------------------------------
 #Check chorme ( required for portal automation)
 #-------------------------------
+# -------------------------------
+# Check Chrome (required for portal automation)
+# -------------------------------
 echo "Checking Chrome..."
-if [! -d"/Applications/Google Chrome.app"]; then
+
+if [ ! -d "/Applications/Google Chrome.app" ]; then
   echo "ERROR: Google Chrome not found in /Applications."
   echo "Please install Chrome from https://www.google.com/chrome/ and try again."
   exit 1
 fi
+
 echo "Google Chrome found."
-echo
+echo ""
 
 # -------------------------------
 # Check / install Homebrew
