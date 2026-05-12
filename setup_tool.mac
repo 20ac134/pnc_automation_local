@@ -1,0 +1,276 @@
+#!/bin/bash
+#
+# setup_mac.sh — PnC Automation Tool, macOS setup
+#
+# Mirrors the bulletproof patterns from setup_windows.bat:
+#   - Verify-by-running (don't trust file existence)
+#   - Self-recovering for stale venvs from Python upgrades
+#   - Pinned dependency versions, not "whatever brew defaults to"
+#   - Direct interpreter paths, no `source activate` weirdness
+
+set -e
+
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT"
+
+# Minimum versions
+MIN_PY_MAJOR=3
+MIN_PY_MINOR=10
+MIN_NODE_MAJOR=18
+
+# Versions to install when missing
+PY_BREW_FORMULA="python@3.12"
+NODE_BREW_FORMULA="node@20"
+
+echo "========================================"
+echo "PnC Automation Tool - macOS Setup"
+echo "========================================"
+echo
+echo "Root folder:"
+echo "$ROOT"
+echo
+
+# -------------------------------
+# Check project folders
+# -------------------------------
+echo "Checking project folders..."
+
+if [ ! -d "$ROOT/vosyn-automation" ]; then
+  echo "ERROR: Backend folder not found:"
+  echo "$ROOT/vosyn-automation"
+  echo
+  echo "Make sure this file is inside launcher/mac/"
+  exit 1
+fi
+
+if [ ! -d "$ROOT/university-job-portal/university-job-portal" ]; then
+  echo "ERROR: Frontend folder not found:"
+  echo "$ROOT/university-job-portal/university-job-portal"
+  exit 1
+fi
+
+echo "Project folders found."
+echo
+
+# -------------------------------
+# Check Chrome (required for portal automation)
+# -------------------------------
+echo "Checking Google Chrome..."
+
+if [ ! -d "/Applications/Google Chrome.app" ]; then
+  echo "ERROR: Google Chrome is required for portal automation."
+  echo "Install from: https://www.google.com/chrome/"
+  echo "Then run setup_mac.sh again."
+  exit 1
+fi
+
+echo "Google Chrome found."
+echo
+
+# -------------------------------
+# Check / install Homebrew
+# -------------------------------
+echo "Checking Homebrew..."
+
+if ! command -v brew >/dev/null 2>&1; then
+  echo "Homebrew not found. Installing..."
+  echo "You will be asked for your Mac password (this is for Homebrew, not us)."
+  echo
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+fi
+
+# Make sure brew's bin is on PATH for the rest of this script.
+# Different locations on Apple Silicon vs Intel Macs.
+if [ -x "/opt/homebrew/bin/brew" ]; then
+  eval "$(/opt/homebrew/bin/brew shellenv)"
+elif [ -x "/usr/local/bin/brew" ]; then
+  eval "$(/usr/local/bin/brew shellenv)"
+else
+  echo "ERROR: Homebrew install reported success but brew is not on PATH."
+  echo "Close Terminal, open a new one, and run setup_mac.sh again."
+  exit 1
+fi
+
+echo "Homebrew $(brew --version | head -1 | awk '{print $2}') ready."
+echo
+
+# -------------------------------
+# Check Python — verified by running it, NOT by parsing version strings
+# -------------------------------
+echo "Checking Python..."
+
+PYTHON_CMD=""
+
+# Try the brew-installed pinned version first.
+PY_PIN_PATH="$(brew --prefix $PY_BREW_FORMULA 2>/dev/null)/bin/python3.12"
+if [ -x "$PY_PIN_PATH" ]; then
+  if "$PY_PIN_PATH" -c "import sys; sys.exit(0 if sys.version_info >= ($MIN_PY_MAJOR, $MIN_PY_MINOR) else 1)" >/dev/null 2>&1; then
+    PYTHON_CMD="$PY_PIN_PATH"
+  fi
+fi
+
+# Fall back to any python3 on PATH that meets the minimum.
+if [ -z "$PYTHON_CMD" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    if python3 -c "import sys; sys.exit(0 if sys.version_info >= ($MIN_PY_MAJOR, $MIN_PY_MINOR) else 1)" >/dev/null 2>&1; then
+      PYTHON_CMD="$(command -v python3)"
+    fi
+  fi
+fi
+
+if [ -z "$PYTHON_CMD" ]; then
+  echo "Python $MIN_PY_MAJOR.$MIN_PY_MINOR+ not found. Installing $PY_BREW_FORMULA via Homebrew..."
+  brew install "$PY_BREW_FORMULA"
+
+  PY_PIN_PATH="$(brew --prefix $PY_BREW_FORMULA)/bin/python3.12"
+  if [ ! -x "$PY_PIN_PATH" ]; then
+    echo "ERROR: Homebrew reported success but $PY_PIN_PATH is missing."
+    exit 1
+  fi
+  PYTHON_CMD="$PY_PIN_PATH"
+fi
+
+echo "Found Python: $PYTHON_CMD"
+"$PYTHON_CMD" --version
+echo "Python OK. Continuing..."
+echo
+
+# -------------------------------
+# Check Node — verified by running it
+# -------------------------------
+echo "Checking Node.js..."
+
+NODE_OK=0
+if command -v node >/dev/null 2>&1; then
+  if node -e "process.exit(parseInt(process.versions.node.split('.')[0]) >= $MIN_NODE_MAJOR ? 0 : 1)" >/dev/null 2>&1; then
+    NODE_OK=1
+  fi
+fi
+
+if [ "$NODE_OK" -eq 0 ]; then
+  echo "Node.js $MIN_NODE_MAJOR+ not found. Installing $NODE_BREW_FORMULA via Homebrew..."
+  brew install "$NODE_BREW_FORMULA"
+
+  # node@20 is keg-only — link it so `node` is on PATH.
+  brew link --overwrite --force "$NODE_BREW_FORMULA" 2>/dev/null || true
+
+  # Refresh PATH for node@20's location
+  NODE_PIN_BIN="$(brew --prefix $NODE_BREW_FORMULA)/bin"
+  if [ -d "$NODE_PIN_BIN" ]; then
+    export PATH="$NODE_PIN_BIN:$PATH"
+  fi
+
+  if ! command -v node >/dev/null 2>&1; then
+    echo "ERROR: Node install reported success but 'node' is not on PATH."
+    echo "Close Terminal, open a new one, and run setup_mac.sh again."
+    exit 1
+  fi
+fi
+
+echo "Found Node.js: $(command -v node)"
+node --version
+echo "Node.js OK. Continuing..."
+echo
+
+# -------------------------------
+# Check npm — ships with Node, but verify
+# -------------------------------
+echo "Checking npm..."
+
+if ! command -v npm >/dev/null 2>&1; then
+  echo "ERROR: npm not found. Node.js may not have installed correctly."
+  echo "Try: brew reinstall $NODE_BREW_FORMULA"
+  exit 1
+fi
+
+echo "Found npm: $(command -v npm)"
+npm --version
+echo "npm OK. Continuing..."
+echo
+
+# -------------------------------
+# Backend setup
+# -------------------------------
+echo "========================================"
+echo "Setting up backend"
+echo "========================================"
+echo
+
+cd "$ROOT/vosyn-automation"
+
+if [ ! -f "requirements.txt" ]; then
+  echo "ERROR: requirements.txt not found in $(pwd)"
+  exit 1
+fi
+
+# Detect and rebuild broken venvs. The activate script or the python symlink
+# can exist as a file even when the underlying Python interpreter has moved
+# or been removed (e.g. brew upgrade python). Only running the venv python
+# tells us if it actually works.
+if [ -d "env" ]; then
+  VENV_OK=0
+  if [ -x "env/bin/python" ]; then
+    if env/bin/python -c "import sys" >/dev/null 2>&1; then
+      VENV_OK=1
+    fi
+  fi
+
+  if [ "$VENV_OK" -eq 0 ]; then
+    echo "Found broken virtual environment (stale interpreter reference)."
+    echo "Removing and recreating..."
+    rm -rf env
+  else
+    echo "Backend virtual environment is healthy."
+  fi
+fi
+
+if [ ! -d "env" ]; then
+  echo "Creating Python virtual environment..."
+  "$PYTHON_CMD" -m venv env
+
+  if [ ! -x "env/bin/python" ]; then
+    echo "ERROR: venv reported success but env/bin/python is missing or not executable."
+    exit 1
+  fi
+fi
+
+# Use the venv's python directly. No `source activate` — avoids shell-state
+# weirdness and plays nicely with set -e.
+VENV_PY="$(pwd)/env/bin/python"
+
+echo "Upgrading pip..."
+"$VENV_PY" -m pip install --upgrade pip
+
+echo "Installing backend dependencies..."
+"$VENV_PY" -m pip install -r requirements.txt
+
+echo
+
+# -------------------------------
+# Frontend setup
+# -------------------------------
+echo "========================================"
+echo "Setting up frontend"
+echo "========================================"
+echo
+
+cd "$ROOT/university-job-portal/university-job-portal"
+
+if [ ! -f "package.json" ]; then
+  echo "ERROR: package.json not found in $(pwd)"
+  exit 1
+fi
+
+if [ ! -d "node_modules" ]; then
+  echo "Installing frontend dependencies..."
+  npm install
+else
+  echo "Frontend dependencies already installed."
+fi
+
+echo
+echo "========================================"
+echo "Setup complete."
+echo "Now run:"
+echo "  ./launcher/mac/start_pnc_tool_mac.sh"
+echo "========================================"

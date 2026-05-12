@@ -7,7 +7,7 @@ on:
   push:
     branches: [main, master]
     paths:
-      - "launchers/mac/**"
+      - "launcher/mac/**"
       - "vosyn-automation/requirements.txt"
       - "university-job-portal/university-job-portal/package.json"
       - ".github/workflows/test-mac-setup.yml"
@@ -45,10 +45,10 @@ jobs:
 
       - name: Make setup script executable
         # Required because git on Windows may strip the executable bit
-        run: chmod +x launchers/mac/setup_mac.sh
+        run: chmod +x launcher/mac/setup_mac.sh
 
       - name: Run setup_mac.sh
-        run: ./launchers/mac/setup_mac.sh
+        run: ./launcher/mac/setup_mac.sh
 
       - name: Verify venv was created and is healthy
         # Don't trust file existence — actually run the venv python
