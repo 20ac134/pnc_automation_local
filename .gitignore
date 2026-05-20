@@ -101,3 +101,6 @@ downloads/
 python-*-installer.exe
 node-*-installer.msi
 *.dmg
+
+
+vosyn-automation/reports/

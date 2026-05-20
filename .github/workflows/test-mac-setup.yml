@@ -1,8 +1,5 @@
 name: Test Mac Setup
 
-# Runs on every push to main, every PR, and can be triggered manually.
-# Catches install-pipeline bugs in setup_mac.sh without needing a real Mac.
-
 on:
   push:
     branches: [main, master]
@@ -10,138 +7,138 @@ on:
       - "launcher/mac/**"
       - "vosyn-automation/requirements.txt"
       - "university-job-portal/university-job-portal/package.json"
+      - "university-job-portal/university-job-portal/package-lock.json"
+      - ".github/workflows/test.yml"
       - ".github/workflows/test-mac-setup.yml"
+
   pull_request:
     branches: [main, master]
-  workflow_dispatch: # lets you trigger manually from the Actions tab
+
+  workflow_dispatch:
 
 jobs:
   test-mac-setup:
-    name: Run setup_mac.sh on fresh macOS
-    runs-on: macos-latest # GitHub's free macOS runner (Apple Silicon)
+    name: Run setup.sh on fresh macOS
+    runs-on: macos-latest
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Show runner environment
-        # Quick diagnostic — useful when something breaks to know what we're on
         run: |
           echo "macOS version: $(sw_vers -productVersion)"
           echo "Arch:          $(uname -m)"
           echo "Shell:         $SHELL"
-          echo "Pre-installed Python: $(python3 --version 2>&1 || echo none)"
-          echo "Pre-installed Node:   $(node --version 2>&1 || echo none)"
-          echo "Pre-installed brew:   $(brew --version 2>&1 | head -1 || echo none)"
+          echo "Python:        $(python3 --version 2>&1 || echo none)"
+          echo "Node:          $(node --version 2>&1 || echo none)"
+          echo "npm:           $(npm --version 2>&1 || echo none)"
+          echo "Homebrew:      $(brew --version 2>&1 | head -1 || echo none)"
 
-      - name: Stub Chrome (CI runners don't have Chrome.app, our script requires it)
-        # Our setup_mac.sh fails fast if /Applications/Google Chrome.app is missing.
-        # That's correct production behavior, but on CI we don't actually run Chrome —
-        # we just want to verify the install pipeline. Create a stub app bundle to
-        # satisfy the existence check.
+      - name: Stub Chrome
         run: |
           sudo mkdir -p "/Applications/Google Chrome.app/Contents/MacOS"
           sudo touch "/Applications/Google Chrome.app/Contents/Info.plist"
 
-      - name: Make setup script executable
-        # Required because git on Windows may strip the executable bit
-        run: chmod +x launcher/mac/setup_mac.sh
+      - name: Make Mac scripts executable
+        run: chmod +x launcher/mac/*.sh
 
-      - name: Run setup_mac.sh
-        run: ./launcher/mac/setup_mac.sh
+      - name: Run Mac setup script
+        run: ./launcher/mac/setup.sh
 
-      - name: Verify venv was created and is healthy
-        # Don't trust file existence — actually run the venv python
+      - name: Verify backend venv was created and is healthy
         run: |
           cd vosyn-automation
           test -x env/bin/python || { echo "FAIL: env/bin/python missing"; exit 1; }
           env/bin/python -c "import sys; print(f'venv python: {sys.version}')"
 
-      - name: Verify critical packages imported successfully
-        # These are the packages that have bitten us before. If any fail to
-        # import, requirements.txt is missing them — the same bug class we
-        # ground through on Windows.
+      - name: Verify critical backend packages import successfully
         run: |
           cd vosyn-automation
-          env/bin/python -c "
-          import importlib, sys
+          env/bin/python - <<'PY'
+          import importlib
+          import sys
+
           required = [
-              'fastapi',
-              'uvicorn',
-              'pandas',
-              'undetected_chromedriver',
-              'google.generativeai',
-              'selenium',
-              'openpyxl',
+              "fastapi",
+              "uvicorn",
+              "pandas",
+              "undetected_chromedriver",
+              "google.generativeai",
+              "selenium",
+              "openpyxl",
           ]
+
           missing = []
+
           for mod in required:
               try:
                   importlib.import_module(mod)
-                  print(f'  ok  {mod}')
+                  print(f"ok {mod}")
               except ImportError as e:
-                  print(f'  FAIL  {mod} -- {e}')
+                  print(f"FAIL {mod} -- {e}")
                   missing.append(mod)
+
           if missing:
-              print(f'\nMissing packages: {missing}')
-              print('Add them to requirements.txt')
+              print(f"\nMissing packages: {missing}")
+              print("Add them to requirements.txt")
               sys.exit(1)
-          print('\nAll critical packages importable.')
-          "
+
+          print("\nAll critical packages importable.")
+          PY
 
       - name: Verify api.py imports cleanly
-        # If api.py has hardcoded paths or other startup bugs, this fails here
-        # instead of waiting for a Mac user to hit it.
         run: |
           cd vosyn-automation
-          env/bin/python -c "
-          import sys, traceback
+          env/bin/python - <<'PY'
+          import sys
+          import traceback
+
           try:
               from src.API import api
-              print('api.py imports cleanly')
+              print("api.py imports cleanly")
           except Exception:
-              print('FAIL: api.py raised on import:')
+              print("FAIL: api.py raised on import:")
               traceback.print_exc()
               sys.exit(1)
-          "
+          PY
 
-      - name: Verify uvicorn can boot the app
-        # Smoke test: start uvicorn, wait for it to listen, hit the root endpoint,
-        # then shut down. Catches anything that fails at server-startup time but
-        # not at import time (e.g. missing data files, port issues).
+      - name: Verify uvicorn can boot the backend
         run: |
           cd vosyn-automation
-          env/bin/python -m uvicorn src.API.api:app --host 127.0.0.1 --port 8000 &
+
+          env/bin/python -m uvicorn src.API.api:app --host 127.0.0.1 --port 8000 > /tmp/pnc-ci-backend.log 2>&1 &
           UVICORN_PID=$!
 
-          # Poll for up to 30 seconds
           for i in {1..30}; do
-            if curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/ | grep -qE "^[2-4][0-9][0-9]$"; then
-              echo "Backend responded after ${i}s"
+            STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/ || true)
+
+            if echo "$STATUS_CODE" | grep -qE "^[2-4][0-9][0-9]$"; then
+              echo "Backend responded after ${i}s with status $STATUS_CODE"
               break
             fi
+
             if ! kill -0 $UVICORN_PID 2>/dev/null; then
               echo "FAIL: uvicorn exited during startup"
+              echo "Last backend logs:"
+              tail -n 50 /tmp/pnc-ci-backend.log
               exit 1
             fi
+
             sleep 1
           done
 
-          # Final check
-          if ! curl -fsS http://127.0.0.1:8000/ >/dev/null 2>&1; then
+          STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/ || true)
+
+          if ! echo "$STATUS_CODE" | grep -qE "^[2-4][0-9][0-9]$"; then
             echo "FAIL: Backend did not respond within 30s"
+            echo "Last backend logs:"
+            tail -n 50 /tmp/pnc-ci-backend.log
             kill $UVICORN_PID 2>/dev/null || true
             exit 1
           fi
 
-          # Hit /api/countries to verify Excel loading works
-          echo "Testing /api/countries..."
-          if curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/ | grep -qE "^[2-4][0-9][0-9]$"; then
-            echo ""
-            echo "Backend smoke test PASSED"
-          else
-            echo "WARN: /api/countries failed (may be expected if data files aren't in repo)"
-          fi
+          echo "Backend smoke test PASSED"
 
           kill $UVICORN_PID 2>/dev/null || true
           wait $UVICORN_PID 2>/dev/null || true
@@ -150,16 +147,10 @@ jobs:
         run: |
           cd university-job-portal/university-job-portal
           test -d node_modules || { echo "FAIL: node_modules missing"; exit 1; }
-          # Verify a key package landed
           test -d node_modules/react || { echo "FAIL: react not installed"; exit 1; }
           echo "Frontend deps OK"
 
       - name: Verify frontend builds
-        # If vite.config.ts has syntax errors or the build is broken on Mac,
-        # this catches it.
         run: |
           cd university-job-portal/university-job-portal
-          npm run build || {
-            echo "WARN: npm run build failed (may be expected if your project has no build script yet)"
-            exit 0
-          }
+          npm run build

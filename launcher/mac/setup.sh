@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# setup_mac.sh - PnC Automation Tool, macOS setup
+# setup.sh - PnC Automation Tool macOS setup
 #
 
 set -e
@@ -8,12 +8,13 @@ set -e
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-# Minimum versions
+BACKEND_DIR="$ROOT/vosyn-automation"
+FRONTEND_DIR="$ROOT/university-job-portal/university-job-portal"
+
 MIN_PY_MAJOR=3
 MIN_PY_MINOR=10
 MIN_NODE_MAJOR=18
 
-# Versions to install when missing
 PY_BREW_FORMULA="python@3.12"
 NODE_BREW_FORMULA="node@20"
 
@@ -25,94 +26,74 @@ echo "Root folder:"
 echo "$ROOT"
 echo ""
 
-# -------------------------------
-# Check project folders
-# -------------------------------
 echo "Checking project folders..."
 
-if [ ! -d "$ROOT/vosyn-automation" ]; then
+if [ ! -d "$BACKEND_DIR" ]; then
   echo "ERROR: Backend folder not found:"
-  echo "$ROOT/vosyn-automation"
-  echo ""
-  echo "Make sure this file is inside launcher/mac/"
+  echo "$BACKEND_DIR"
   exit 1
 fi
 
-if [ ! -d "$ROOT/university-job-portal/university-job-portal" ]; then
+if [ ! -d "$FRONTEND_DIR" ]; then
   echo "ERROR: Frontend folder not found:"
-  echo "$ROOT/university-job-portal/university-job-portal"
+  echo "$FRONTEND_DIR"
   exit 1
 fi
 
 echo "Project folders found."
 echo ""
 
-# -------------------------------
-# Check Chrome
-# -------------------------------
-echo "Checking Chrome..."
+echo "Checking Google Chrome..."
 
 if [ ! -d "/Applications/Google Chrome.app" ]; then
   echo "ERROR: Google Chrome is required for portal automation."
-  echo "Install from: https://www.google.com/chrome/"
-  echo "Then run setup_mac.sh again."
+  echo "Install Chrome, then run setup again:"
+  echo "https://www.google.com/chrome/"
   exit 1
 fi
 
 echo "Google Chrome found."
 echo ""
 
-# -------------------------------
-# Check / install Homebrew
-# -------------------------------
 echo "Checking Homebrew..."
 
 if ! command -v brew >/dev/null 2>&1; then
-  echo "Homebrew not found. Installing..."
-  echo "You will be asked for your Mac password."
-  echo ""
+  echo "Homebrew not found. Installing Homebrew..."
+  echo "You may be asked for your Mac password."
   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 fi
 
-# Load brew into PATH for this script. Different paths on Apple Silicon vs Intel.
 if [ -x "/opt/homebrew/bin/brew" ]; then
   eval "$(/opt/homebrew/bin/brew shellenv)"
 elif [ -x "/usr/local/bin/brew" ]; then
   eval "$(/usr/local/bin/brew shellenv)"
 else
-  echo "ERROR: Homebrew install reported success but brew is not on PATH."
-  echo "Close Terminal, open a new one, and run setup_mac.sh again."
+  echo "ERROR: Homebrew was installed but could not be found on PATH."
+  echo "Close Terminal, reopen it, and run setup again."
   exit 1
 fi
 
 echo "Homebrew ready."
 echo ""
 
-# -------------------------------
-# Check Python
-# -------------------------------
 echo "Checking Python..."
 
 PYTHON_CMD=""
 
-# Try the brew-pinned version first.
 PY_PIN_PREFIX="$(brew --prefix "$PY_BREW_FORMULA" 2>/dev/null || true)"
+
 if [ -n "$PY_PIN_PREFIX" ] && [ -x "$PY_PIN_PREFIX/bin/python3.12" ]; then
   if "$PY_PIN_PREFIX/bin/python3.12" -c "import sys; sys.exit(0 if sys.version_info >= ($MIN_PY_MAJOR, $MIN_PY_MINOR) else 1)" >/dev/null 2>&1; then
     PYTHON_CMD="$PY_PIN_PREFIX/bin/python3.12"
   fi
 fi
 
-# Fall back to any python3 on PATH that meets the minimum.
-if [ -z "$PYTHON_CMD" ]; then
-  if command -v python3 >/dev/null 2>&1; then
-    if python3 -c "import sys; sys.exit(0 if sys.version_info >= ($MIN_PY_MAJOR, $MIN_PY_MINOR) else 1)" >/dev/null 2>&1; then
-      PYTHON_CMD="$(command -v python3)"
-    fi
+if [ -z "$PYTHON_CMD" ] && command -v python3 >/dev/null 2>&1; then
+  if python3 -c "import sys; sys.exit(0 if sys.version_info >= ($MIN_PY_MAJOR, $MIN_PY_MINOR) else 1)" >/dev/null 2>&1; then
+    PYTHON_CMD="$(command -v python3)"
   fi
 fi
 
-# Still nothing? Install via brew.
 if [ -z "$PYTHON_CMD" ]; then
   echo "Python $MIN_PY_MAJOR.$MIN_PY_MINOR+ not found. Installing $PY_BREW_FORMULA..."
   brew install "$PY_BREW_FORMULA"
@@ -124,21 +105,18 @@ if [ -z "$PYTHON_CMD" ]; then
 fi
 
 if [ -z "$PYTHON_CMD" ]; then
-  echo "ERROR: Could not find or install a working Python."
+  echo "ERROR: Could not find or install Python."
   exit 1
 fi
 
 echo "Found Python: $PYTHON_CMD"
 "$PYTHON_CMD" --version
-echo "Python OK."
 echo ""
 
-# -------------------------------
-# Check Node
-# -------------------------------
 echo "Checking Node.js..."
 
 NODE_OK=0
+
 if command -v node >/dev/null 2>&1; then
   if node -e "process.exit(parseInt(process.versions.node.split('.')[0]) >= $MIN_NODE_MAJOR ? 0 : 1)" >/dev/null 2>&1; then
     NODE_OK=1
@@ -149,59 +127,51 @@ if [ "$NODE_OK" -eq 0 ]; then
   echo "Node.js $MIN_NODE_MAJOR+ not found. Installing $NODE_BREW_FORMULA..."
   brew install "$NODE_BREW_FORMULA"
 
-  # node@20 is keg-only - link it so 'node' is on PATH.
   brew link --overwrite --force "$NODE_BREW_FORMULA" 2>/dev/null || true
 
-  # Add node@20 bin to PATH for this session.
   NODE_PIN_PREFIX="$(brew --prefix "$NODE_BREW_FORMULA" 2>/dev/null || true)"
   if [ -n "$NODE_PIN_PREFIX" ] && [ -d "$NODE_PIN_PREFIX/bin" ]; then
     export PATH="$NODE_PIN_PREFIX/bin:$PATH"
   fi
+fi
 
-  if ! command -v node >/dev/null 2>&1; then
-    echo "ERROR: Node install reported success but 'node' is not on PATH."
-    echo "Close Terminal, open a new one, and run setup_mac.sh again."
-    exit 1
-  fi
+if ! command -v node >/dev/null 2>&1; then
+  echo "ERROR: Node.js install completed but node is not on PATH."
+  echo "Close Terminal, reopen it, and run setup again."
+  exit 1
 fi
 
 echo "Found Node.js: $(command -v node)"
 node --version
-echo "Node.js OK."
 echo ""
 
-# -------------------------------
-# Check npm
-# -------------------------------
 echo "Checking npm..."
 
 if ! command -v npm >/dev/null 2>&1; then
-  echo "ERROR: npm not found. Try: brew reinstall $NODE_BREW_FORMULA"
+  echo "ERROR: npm not found."
+  echo "Try running: brew reinstall $NODE_BREW_FORMULA"
   exit 1
 fi
 
 echo "Found npm: $(command -v npm)"
 npm --version
-echo "npm OK."
 echo ""
 
-# -------------------------------
-# Backend setup
-# -------------------------------
 echo "========================================"
 echo "Setting up backend"
 echo "========================================"
 echo ""
 
-cd "$ROOT/vosyn-automation"
+cd "$BACKEND_DIR"
 
 if [ ! -f "requirements.txt" ]; then
-  echo "ERROR: requirements.txt not found in $(pwd)"
+  echo "ERROR: requirements.txt not found in:"
+  echo "$BACKEND_DIR"
   exit 1
 fi
 
-# Detect and rebuild broken venvs.
 REBUILD_VENV=0
+
 if [ -d "env" ]; then
   if [ ! -x "env/bin/python" ]; then
     REBUILD_VENV=1
@@ -211,23 +181,18 @@ if [ -d "env" ]; then
 fi
 
 if [ "$REBUILD_VENV" -eq 1 ]; then
-  echo "Found broken virtual environment. Removing and recreating..."
+  echo "Broken backend virtual environment found. Recreating..."
   rm -rf env
 fi
 
 if [ ! -d "env" ]; then
-  echo "Creating Python virtual environment..."
+  echo "Creating backend virtual environment..."
   "$PYTHON_CMD" -m venv env
-
-  if [ ! -x "env/bin/python" ]; then
-    echo "ERROR: venv reported success but env/bin/python is missing."
-    exit 1
-  fi
 else
-  echo "Backend virtual environment is healthy."
+  echo "Backend virtual environment already exists."
 fi
 
-VENV_PY="$ROOT/vosyn-automation/env/bin/python"
+VENV_PY="$BACKEND_DIR/env/bin/python"
 
 echo "Upgrading pip..."
 "$VENV_PY" -m pip install --upgrade pip
@@ -237,31 +202,30 @@ echo "Installing backend dependencies..."
 
 echo ""
 
-# -------------------------------
-# Frontend setup
-# -------------------------------
 echo "========================================"
 echo "Setting up frontend"
 echo "========================================"
 echo ""
 
-cd "$ROOT/university-job-portal/university-job-portal"
+cd "$FRONTEND_DIR"
 
 if [ ! -f "package.json" ]; then
-  echo "ERROR: package.json not found in $(pwd)"
+  echo "ERROR: package.json not found in:"
+  echo "$FRONTEND_DIR"
   exit 1
 fi
 
-if [ ! -d "node_modules" ]; then
-  echo "Installing frontend dependencies..."
-  npm install
+if [ -f "package-lock.json" ]; then
+  echo "Installing frontend dependencies using npm ci..."
+  npm ci
 else
-  echo "Frontend dependencies already installed."
+  echo "Installing frontend dependencies using npm install..."
+  npm install
 fi
 
 echo ""
 echo "========================================"
 echo "Setup complete."
 echo "Now run:"
-echo "  ./launcher/mac/start_pnc_tool_mac.sh"
+echo "  ./launcher/mac/start.sh"
 echo "========================================"

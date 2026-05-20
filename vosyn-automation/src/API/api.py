@@ -247,7 +247,7 @@ def submit_application(payload: SubmitRequest, background_tasks: BackgroundTasks
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/status/{run_id}")
+@app.get("/api/status/{run_id}" )
 def get_status(run_id: str):
     """Poll this to check if a playbook run has finished."""
     with JOB_STORE_LOCK:

@@ -1,17 +1,42 @@
 @echo off
 setlocal enabledelayedexpansion
 
+REM -------------------------------
+REM Self-elevate to administrator if not already.
+REM This must happen BEFORE anything else, including setlocal/cd commands
+REM that depend on the user's environment.
+REM
+REM `net session` is the canonical non-destructive admin check — it requires
+REM admin to succeed and exits with an error otherwise. No side effects.
+REM -------------------------------
+net session >nul 2>&1
+if errorlevel 1 (
+    echo This setup needs administrator privileges to install Node.js.
+    echo Requesting elevation...
+    echo.
+    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+    exit /b 0
+)
+
+REM After elevation, the working directory defaults to system32. Re-anchor.
 set "ROOT=%~dp0..\.."
 cd /d "%ROOT%"
 
+REM Minimum versions
 set "MIN_PY_MAJOR=3"
 set "MIN_PY_MINOR=10"
+set "MIN_NODE_MAJOR=18"
+
+REM Versions to install when missing
+set "PY_INSTALL_VERSION=3.12.7"
+set "NODE_INSTALL_VERSION=20.18.0"
 
 title PnC Automation Tool - Windows Setup
 
 echo ========================================
 echo PnC Automation Tool - Windows Setup
 echo ========================================
+echo Running as Administrator.
 echo.
 echo Root folder:
 echo %CD%
@@ -40,181 +65,204 @@ echo Project folders found.
 echo.
 
 REM -------------------------------
-REM Check winget
+REM Check curl (required for direct downloads)
 REM -------------------------------
-echo Checking winget...
-
-set "HAS_WINGET=0"
-winget --version >nul 2>&1
-IF NOT ERRORLEVEL 1 set "HAS_WINGET=1"
-
-IF "!HAS_WINGET!"=="1" (
-    echo winget found.
-) ELSE (
-    echo WARNING: winget not found. Auto-install will be unavailable.
+where curl >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: curl not found. curl ships with Windows 10 1803+ and Server 2019+.
+    echo On older Windows, install Python and Node.js manually:
+    echo   Python: https://www.python.org/downloads/
+    echo   Node.js: https://nodejs.org/
+    pause
+    exit /b 1
 )
 
-echo.
-
 REM -------------------------------
-REM Check Python (real install, not Microsoft Store stub)
+REM Check Python — version verified by running Python itself, NOT by parsing
+REM the --version string (CMD's GEQ falls back to string comparison and lies).
 REM -------------------------------
 echo Checking Python...
 
-REM `where` only inspects PATH — it doesn't execute python, so it can't trigger
-REM the Microsoft Store stub. We then filter out any paths under WindowsApps,
-REM since those are the stub itself.
 set "PYTHON_CMD="
-for /f "delims=" %%i in ('where python 2^>nul') do (
-    if not defined PYTHON_CMD (
-        echo %%i | findstr /i "WindowsApps" >nul
-        if errorlevel 1 set "PYTHON_CMD=%%i"
-    )
-)
 
-REM Also check `py` launcher (python.org installer registers this).
-if not defined PYTHON_CMD (
-    where py >nul 2>&1
+REM Try py launcher first (python.org installer registers this globally).
+where py >nul 2>&1
+if not errorlevel 1 (
+    py -3 -c "import sys; sys.exit(0 if sys.version_info >= (%MIN_PY_MAJOR%, %MIN_PY_MINOR%) else 1)" >nul 2>&1
     if not errorlevel 1 set "PYTHON_CMD=py -3"
 )
 
-set "PYTHON_OK=0"
-if defined PYTHON_CMD (
-    REM Verify the version meets minimum.
-    for /f "tokens=2" %%v in ('!PYTHON_CMD! --version 2^>^&1') do (
-        for /f "tokens=1,2 delims=." %%a in ("%%v") do (
-            if %%a GEQ %MIN_PY_MAJOR% (
-                if %%a GTR %MIN_PY_MAJOR% (
-                    set "PYTHON_OK=1"
-                ) else (
-                    if %%b GEQ %MIN_PY_MINOR% set "PYTHON_OK=1"
-                )
+REM Fall back to python on PATH, skipping the Microsoft Store stub.
+if not defined PYTHON_CMD (
+    for /f "delims=" %%i in ('where python 2^>nul') do (
+        if not defined PYTHON_CMD (
+            echo %%i | findstr /i "WindowsApps" >nul
+            if errorlevel 1 (
+                "%%i" -c "import sys; sys.exit(0 if sys.version_info >= (%MIN_PY_MAJOR%, %MIN_PY_MINOR%) else 1)" >nul 2>&1
+                if not errorlevel 1 set "PYTHON_CMD=%%i"
             )
         )
     )
 )
 
-IF "!PYTHON_OK!"=="1" (
+if defined PYTHON_CMD (
     echo Found Python: !PYTHON_CMD!
     !PYTHON_CMD! --version
     echo Python OK. Continuing...
-) ELSE (
-    if defined PYTHON_CMD (
-        echo Found Python at !PYTHON_CMD! but version is older than %MIN_PY_MAJOR%.%MIN_PY_MINOR%.
-    ) else (
-        echo Python not found ^(or only the Microsoft Store stub is present^).
-    )
+    goto :python_done
+)
 
-    IF "!HAS_WINGET!"=="0" (
-        echo.
-        echo Cannot auto-install without winget.
-        echo Install Python 3.12 from https://www.python.org/downloads/
-        echo IMPORTANT: Check "Add python.exe to PATH" in the installer.
-        echo Then run setup_windows.bat again.
-        pause
-        exit /b 1
-    )
+REM -------------------------------
+REM No usable Python — install from python.org directly
+REM -------------------------------
+echo Python %MIN_PY_MAJOR%.%MIN_PY_MINOR%+ not found ^(or only the Microsoft Store stub is present^).
+echo.
+echo Installing Python %PY_INSTALL_VERSION% from python.org...
+echo.
 
+set "PY_INSTALLER=%TEMP%\python-%PY_INSTALL_VERSION%-installer.exe"
+set "PY_URL=https://www.python.org/ftp/python/%PY_INSTALL_VERSION%/python-%PY_INSTALL_VERSION%-amd64.exe"
+
+echo Downloading from:
+echo %PY_URL%
+echo.
+
+curl -L -o "%PY_INSTALLER%" "%PY_URL%"
+if errorlevel 1 (
     echo.
-    echo Installing Python 3.12 using winget...
-    echo If a UAC prompt appears, click Yes.
-    echo ^(winget output below — read it if anything goes wrong^)
-    echo ----------------------------------------
-
-    REM Don't suppress winget output. If it fails, the user needs to see why.
-    winget install Python.Python.3.12 -e --accept-package-agreements --accept-source-agreements
-    set "WINGET_RESULT=!ERRORLEVEL!"
-    echo ----------------------------------------
-
-    IF NOT "!WINGET_RESULT!"=="0" (
-        echo.
-        echo ERROR: winget exited with code !WINGET_RESULT!.
-        echo.
-        echo Common causes:
-        echo   - UAC prompt was dismissed ^(needs admin rights^)
-        echo   - No internet connection
-        echo   - Winget source out of date — try: winget source update
-        echo   - Package ID changed in your winget version
-        echo.
-        echo Install manually from https://www.python.org/downloads/
-        echo Make sure to check "Add python.exe to PATH".
-        pause
-        exit /b 1
-    )
-
-    echo.
-    echo Python installed successfully.
-    echo.
-    echo IMPORTANT: Close this window and run setup_windows.bat again.
-    echo The new PATH won't take effect in this session.
+    echo ERROR: Download failed. Check your internet connection.
+    echo Or install manually from https://www.python.org/downloads/
     pause
-    exit /b 0
+    exit /b 1
 )
 
 echo.
+echo Running silent installer...
+echo ----------------------------------------
+"%PY_INSTALLER%" /quiet InstallAllUsers=0 PrependPath=1 Include_test=0 Include_pip=1 Include_launcher=1
+set "INSTALL_RESULT=!ERRORLEVEL!"
+echo ----------------------------------------
+
+del "%PY_INSTALLER%" >nul 2>&1
+
+if not "!INSTALL_RESULT!"=="0" (
+    echo.
+    echo ERROR: Python installer exited with code !INSTALL_RESULT!.
+    echo Install manually from https://www.python.org/downloads/
+    echo Make sure "Add python.exe to PATH" is checked.
+    pause
+    exit /b 1
+)
+
+echo.
+echo Python %PY_INSTALL_VERSION% installed successfully.
+echo.
+echo IMPORTANT: Close this window and run setup_windows.bat again.
+echo The new PATH won't take effect in this session.
+pause
+exit /b 0
+
+:python_done
+echo.
 
 REM -------------------------------
-REM Check Node.js
+REM Check Node.js — version verified by running Node itself
 REM -------------------------------
 echo Checking Node.js...
 
-set "NODE_CMD="
-for /f "delims=" %%i in ('where node 2^>nul') do (
-    if not defined NODE_CMD set "NODE_CMD=%%i"
+set "NODE_OK=0"
+where node >nul 2>&1
+if not errorlevel 1 (
+    node -e "process.exit(parseInt(process.versions.node.split('.')[0]) >= %MIN_NODE_MAJOR% ? 0 : 1)" >nul 2>&1
+    if not errorlevel 1 set "NODE_OK=1"
 )
 
-IF defined NODE_CMD (
+if "!NODE_OK!"=="1" (
+    echo Found Node.js:
     node --version
-    echo Node.js found. Continuing...
-) ELSE (
-    echo Node.js not found.
+    echo Node.js OK. Continuing...
+    goto :node_done
+)
 
-    IF "!HAS_WINGET!"=="0" (
-        echo.
-        echo Install Node.js LTS from https://nodejs.org/
-        echo Then run setup_windows.bat again.
-        pause
-        exit /b 1
-    )
+REM -------------------------------
+REM No usable Node — install from nodejs.org directly
+REM -------------------------------
+echo Node.js %MIN_NODE_MAJOR%+ not found.
+echo.
+echo Installing Node.js %NODE_INSTALL_VERSION% LTS from nodejs.org...
+echo.
 
-    echo Installing Node.js LTS using winget...
-    echo ----------------------------------------
-    winget install OpenJS.NodeJS.LTS -e --accept-package-agreements --accept-source-agreements
-    set "WINGET_RESULT=!ERRORLEVEL!"
-    echo ----------------------------------------
+set "NODE_INSTALLER=%TEMP%\node-%NODE_INSTALL_VERSION%-installer.msi"
+set "NODE_URL=https://nodejs.org/dist/v%NODE_INSTALL_VERSION%/node-v%NODE_INSTALL_VERSION%-x64.msi"
 
-    IF NOT "!WINGET_RESULT!"=="0" (
-        echo.
-        echo ERROR: winget exited with code !WINGET_RESULT!.
-        echo Install manually from https://nodejs.org/ and run setup again.
-        pause
-        exit /b 1
-    )
+echo Downloading from:
+echo %NODE_URL%
+echo.
 
+curl -L -o "%NODE_INSTALLER%" "%NODE_URL%"
+if errorlevel 1 (
     echo.
-    echo Node.js installed successfully.
-    echo Close this window and run setup_windows.bat again.
+    echo ERROR: Download failed. Check your internet connection.
+    echo Or install manually from https://nodejs.org/
     pause
-    exit /b 0
+    exit /b 1
 )
 
 echo.
+echo Running silent installer...
+echo ----------------------------------------
+msiexec /i "%NODE_INSTALLER%" /quiet /norestart ADDLOCAL=ALL
+set "INSTALL_RESULT=!ERRORLEVEL!"
+echo ----------------------------------------
+
+del "%NODE_INSTALLER%" >nul 2>&1
+
+if not "!INSTALL_RESULT!"=="0" (
+    echo.
+    echo ERROR: Node.js installer exited with code !INSTALL_RESULT!.
+    echo Common causes:
+    echo   - Antivirus blocked the installer
+    echo   - Disk full or permission issue on Program Files
+    echo Install manually from https://nodejs.org/
+    pause
+    exit /b 1
+)
+
+echo.
+echo Node.js %NODE_INSTALL_VERSION% installed successfully.
+echo.
+echo IMPORTANT: Close this window and run setup_windows.bat again.
+echo The new PATH won't take effect in this session.
+pause
+exit /b 0
+
+:node_done
+echo.
 
 REM -------------------------------
-REM Check npm
+REM Check npm — npm is npm.cmd on Windows, MUST be invoked with `call`
+REM or control transfers and never returns to this script.
 REM -------------------------------
 echo Checking npm...
 
-npm --version >nul 2>&1
-IF ERRORLEVEL 1 (
-    echo ERROR: npm not found. Node.js may not have installed correctly.
+set "NPM_OK=0"
+where npm >nul 2>&1
+if not errorlevel 1 (
+    call npm --version >nul 2>&1
+    if not errorlevel 1 set "NPM_OK=1"
+)
+
+if not "!NPM_OK!"=="1" (
+    echo ERROR: npm not found or not working.
+    echo Node.js may not have installed correctly.
     echo Reinstall Node.js LTS from https://nodejs.org/
     pause
     exit /b 1
 )
 
-npm --version
-echo npm found. Continuing...
+echo Found npm:
+call npm --version
+echo npm OK. Continuing...
 echo.
 
 REM -------------------------------
@@ -234,11 +282,23 @@ IF NOT EXIST requirements.txt (
     exit /b 1
 )
 
-REM Detect and rebuild broken venvs (Python upgrade leaves stale symlinks).
+REM Detect and rebuild broken venvs. The shim env\Scripts\python.exe can still
+REM exist as a file even when pyvenv.cfg points to a deleted Python install
+REM (e.g. system Python was uninstalled, or you switched from system-wide to
+REM per-user Python). Only running the venv python tells us if it actually works.
 IF EXIST env (
-    IF NOT EXIST "env\Scripts\python.exe" (
-        echo Found broken virtual environment. Removing and recreating...
+    set "VENV_OK=0"
+    IF EXIST "env\Scripts\python.exe" (
+        "env\Scripts\python.exe" -c "import sys" >nul 2>&1
+        if not errorlevel 1 set "VENV_OK=1"
+    )
+
+    IF "!VENV_OK!"=="0" (
+        echo Found broken virtual environment ^(stale interpreter reference^).
+        echo Removing and recreating...
         rmdir /s /q env
+    ) ELSE (
+        echo Backend virtual environment is healthy.
     )
 )
 
@@ -257,8 +317,6 @@ IF NOT EXIST env (
         pause
         exit /b 1
     )
-) ELSE (
-    echo Backend virtual environment already exists.
 )
 
 REM Use the venv's python directly. No `call activate` needed.
@@ -301,7 +359,8 @@ IF NOT EXIST package.json (
 
 IF NOT EXIST node_modules (
     echo node_modules not found. Installing frontend dependencies...
-    npm install
+    REM `call` is required — npm is npm.cmd and would terminate this script otherwise.
+    call npm install
 
     IF ERRORLEVEL 1 (
         echo ERROR: Failed to install frontend dependencies.
@@ -315,8 +374,7 @@ IF NOT EXIST node_modules (
 echo.
 echo ========================================
 echo Setup complete.
-echo Now double-click:
-echo launchers\windows\start_pnc_tool_windows.bat
+echo Now double-click start.bat in the project root.
 echo ========================================
 echo.
 pause

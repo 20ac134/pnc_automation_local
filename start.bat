@@ -1,2 +1,2 @@
 @echo off
-call "%~dp0launcher\windows\start_pnc_tool_windows.bat" %*
+call "%~dp0launchers\windows\start_pnc_tool_windows.bat" %*
