@@ -33,100 +33,119 @@ class MSFormsPlaybook(BasePortalPlaybook):
     # ------------------------------------------------------------------ #
 
     def navigate_to_job_posting(self):
-        # Page 1: Info page — click "Start now" or "Next"
-        print("Step 1/3: Looking for 'Start now' or 'Next' button")
+        # The form has: Cover -> Page 1/3 (info) -> Page 2/3 (contact) -> Page 3/3 (job form)
+
+        # --- Cover page: click "Start now" ---
+        print("Step 1/4: Clicking 'Start now' on cover page")
         self.human_delay(2, 3)
 
+        clicked = False
+        for selector in [
+            "//button[contains(., 'Start now')]",
+            "//button[contains(., 'Start Now')]",
+        ]:
+            try:
+                for el in self.driver.find_elements(By.XPATH, selector):
+                    if el.is_displayed():
+                        self.driver.execute_script("arguments[0].click();", el)
+                        print("  Clicked 'Start now'")
+                        clicked = True
+                        break
+            except:
+                continue
+            if clicked:
+                break
+
+        if not clicked:
+            print("  WARNING: 'Start now' not found")
+
+        self.human_delay(3, 5)
+
+        # --- Page 1/3: info-only page, no inputs — click "Next" to continue ---
+        print("Step 2/4: Skipping info page (Page 1/3) -> clicking Next")
         try:
-            start_selectors = [
-                "//button[contains(., 'Start now')]",
-                "//button[contains(., 'Start Now')]",
-                "//input[@value='Start now']",
-                "//button[contains(., 'Next')]",
-                "//input[@value='Next']",
-            ]
-
-            clicked = False
-            for selector in start_selectors:
-                try:
-                    elements = self.driver.find_elements(By.XPATH, selector)
-                    for el in elements:
-                        if el.is_displayed():
-                            self.driver.execute_script("arguments[0].click();", el)
-                            print("  Clicked 'Start now'")
-                            clicked = True
-                            break
-                except:
-                    continue
-                if clicked:
-                    break
-
-            if not clicked:
-                print("  WARNING: Could not find Start/Next button on page 1")
-
+            next_btn = self.driver.find_element(By.XPATH, "//button[contains(., 'Next')]")
+            self.driver.execute_script("arguments[0].click();", next_btn)
+            print("  Clicked 'Next' -> Contact Information page (Page 2/3)")
         except Exception as e:
-            print(f"  Step 1 failed: {e}")
+            print(f"  Could not click Next on info page: {e}")
 
-        self.human_delay(3, 4)
+        self.human_delay(3, 5)
 
-        # Page 2: Contact Information — fill and click "Next"
-        print("Step 2/3: Filling Contact Information (Page 2)")
-        self.human_delay(2, 3)
+        # --- Page 2/3: Contact Information — fill name, phone, email ---
+        print("Step 3/4: Filling Contact Information (Page 2/3)")
 
         contact_name  = self.job_data.get('ContactName', 'Vosyn HR')
         contact_phone = self.job_data.get('ContactPhone', '437 744 1247')
         contact_email = self.job_data.get('ContactEmail', 'careers@vosyn.ai')
 
-        # Microsoft Forms uses aria-label or placeholder on inputs
-        # Find all visible text inputs on the page
-        try:
-            inputs = self.driver.find_elements(By.XPATH,
-                "//input[@type='text' or @type='email' or @type='tel' or not(@type)]"
-            )
+        contact_mapping = {
+            'first and last name': contact_name,
+            'name': contact_name,
+            'phone number': contact_phone,
+            'phone': contact_phone,
+            'email address': contact_email,
+            'email': contact_email,
+        }
 
-            visible_inputs = []
-            for inp in inputs:
-                try:
-                    if inp.is_displayed():
-                        visible_inputs.append(inp)
-                except:
-                    continue
+        # Find question containers and match by label text
+        questions = self.driver.find_elements(By.XPATH,
+            "//div[contains(@class,'question-content') or contains(@class,'__question')"
+            " or @data-automation-id='questionItem'"
+            " or contains(@class,'office-form-question')]"
+        )
 
-            # Page 2 has 3 fields in order: Name, Phone, Email
-            contact_values = [contact_name, contact_phone, contact_email]
+        filled_count = 0
+        for q in questions:
+            try:
+                label = q.text.split('\n')[0].strip().lower()
+                label = re.sub(r'\s*\*\s*$', '', label)
+                for key, value in contact_mapping.items():
+                    if key in label:
+                        field = q.find_element(By.XPATH, ".//input[@type='text']")
+                        if field.is_displayed():
+                            field.click()
+                            self.human_delay(0.3, 0.5)
+                            field.send_keys(Keys.CONTROL, "a")
+                            field.send_keys(Keys.BACKSPACE)
+                            field.send_keys(str(value))
+                            print(f"  Filled '{key}': {value}")
+                            filled_count += 1
+                            self.human_delay(0.5, 1)
+                        break
+            except:
+                continue
 
-            for i, value in enumerate(contact_values):
+        # Fallback: fill by order (Name, Phone, Email) if container matching failed
+        if filled_count == 0:
+            print("  Container matching failed — filling by order")
+            visible_inputs = [el for el in self.driver.find_elements(By.TAG_NAME, "input")
+                              if el.is_displayed()]
+            for i, value in enumerate([contact_name, contact_phone, contact_email]):
                 if i < len(visible_inputs):
                     try:
-                        field = visible_inputs[i]
-                        field.click()
+                        visible_inputs[i].click()
                         self.human_delay(0.3, 0.5)
-                        field.send_keys(Keys.CONTROL, "a")
-                        field.send_keys(Keys.BACKSPACE)
-                        field.send_keys(str(value))
-                        print(f"  Filled field {i+1}: {str(value)[:40]}")
+                        visible_inputs[i].send_keys(Keys.CONTROL, "a")
+                        visible_inputs[i].send_keys(Keys.BACKSPACE)
+                        visible_inputs[i].send_keys(str(value))
+                        print(f"  Filled field {i+1}: {value}")
                         self.human_delay(0.5, 1)
                     except Exception as e:
-                        print(f"  Error filling field {i+1}: {e}")
+                        print(f"  Error on field {i+1}: {e}")
 
-        except Exception as e:
-            print(f"  Error finding contact fields: {e}")
-
-        # Click "Next" to go to Page 3
+        # --- Click "Next" to advance to Page 3/3 (Job form) ---
+        print("Step 4/4: Clicking 'Next' -> Job posting form (Page 3/3)")
         self.human_delay(1, 2)
         try:
-            next_btn = self.driver.find_element(By.XPATH,
-                "//button[contains(., 'Next')]"
-            )
+            next_btn = self.driver.find_element(By.XPATH, "//button[contains(., 'Next')]")
             self.driver.execute_script("arguments[0].click();", next_btn)
-            print("  Clicked 'Next' to Page 3")
+            print("  Clicked 'Next' -> now on Job Form (Page 3/3)")
         except Exception as e:
             print(f"  Could not click Next: {e}")
 
-        self.human_delay(3, 4)
-
-        # Page 3: Job posting form — handled by fill_job_form
-        print("Step 3/3: Job posting form loaded (Page 3)")
+        self.human_delay(3, 5)
+        print("Job posting form ready")
 
     # ------------------------------------------------------------------ #
     #  FILL JOB FORM — Microsoft Forms fields                             #

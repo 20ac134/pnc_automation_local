@@ -1,8 +1,3 @@
-"""
-api.py -- FastAPI backend for the Vosyn Portal Application UI
-Run with: uvicorn src.API.api:app --reload --port 8000
-"""
-
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -13,6 +8,8 @@ import uuid
 import threading
 from datetime import datetime
 from platform_router import get_playbook_class
+import os
+
 
 # -- Add project root so src.* imports work
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -22,6 +19,8 @@ from src.excel_manager import ExcelManager
 
 app = FastAPI(title="Vosyn Portal API", version="1.0.0")
 
+
+MAX_WORKERS = int(os.environ.get("PNC_MAX_WORKERS", "3")) # This vaalue has been set keeping in mind thet resources are limited on the pnc team, if we get the perimision to hoast it change the number to a reasonable one that can run on the server.
 # -- CORS
 app.add_middleware(
     CORSMiddleware,
@@ -351,83 +350,97 @@ def submit_batch(payload: BatchSubmitRequest, background_tasks: BackgroundTasks)
             "failed":        0,
         }
 
-    def run_batch():
+    def run_single(item, idx):
         import time
-        for idx, item in enumerate(batch_jobs):
-            run_id     = item["run_id"]
-            portal_key = item["portal_key"]
-            job_id     = item["job_id"]
+        run_id     = item["run_id"]
+        portal_key = item["portal_key"]
+        job_id     = item["job_id"]
+
+        with JOB_STORE_LOCK:
+            JOB_STORE[run_id]["status"]     = "running"
+            JOB_STORE[run_id]["message"]    = "Playbook is running..."
+            JOB_STORE[run_id]["started_at"] = datetime.now().isoformat()
+
+        try:
+            portal_url  = Config.get_portal_url(portal_key)
+            credentials = Config.get_credentials(portal_key)
+            PlaybookClass, platform = get_playbook_class(portal_url)
+
+            if not PlaybookClass:
+                raise Exception(f"No playbook for platform '{platform}'")
 
             with JOB_STORE_LOCK:
-                JOB_STORE[run_id]["status"]     = "running"
-                JOB_STORE[run_id]["message"]    = "Playbook is running..."
-                JOB_STORE[run_id]["started_at"] = datetime.now().isoformat()
+                JOB_STORE[run_id]["platform"] = platform
+
+            thread_em = ExcelManager()
+            job = thread_em.get_job(job_id)
+            if not job:
+                raise Exception(f"Job '{job_id}' not found")
+
+            job_data = {
+                "JobId":        job_id,
+                "Title":        job["Title"],
+                "Description":  job["Description"],
+                "Location":     job.get("Location", ""),
+                "City":         job.get("City", "Toronto"),
+                "Salary":       job.get("Salary", ""),
+                "HourlyRate":   job.get("HourlyRate", ""),
+                "Duration":     "520 Hours (approximately 3 months)",
+                "Requirements": job.get("Requirements", ""),
+                "JobType":      job.get("JobType", "Internship"),
+                "Industry":     job.get("Industry", "Technology"),
+                "JobFunction":  job.get("JobFunction", ""),
+                "StudentGroup": job.get("StudentGroup", "All Students"),
+                "Department":   job.get("Department", ""),
+                "portal_name":  portal_key,
+            }
+
+            playbook = PlaybookClass(
+                portal_url=portal_url,
+                credentials=credentials,
+                job_data=job_data,
+            )
+            playbook.run_id = run_id
+            playbook.batch_mode = True
+            result = playbook.execute()
+            p_status = result.get("status", "FAILED")
+        
+
+            with JOB_STORE_LOCK:
+                if p_status == "POSTED":
+                    JOB_STORE[run_id]["status"] = "completed"
+                    JOB_STORE[run_id]["message"] = "Form filled successfully"
+                else:
+                    JOB_STORE[run_id]["status"] = "failed"
+                    JOB_STORE[run_id]["message"] = result.get("error","UNKNOWN_ERROR" )
+                JOB_STORE[run_id]["finished_at"] = datetime.now().isoformat()
+
             with BATCH_STORE_LOCK:
-                BATCH_STORE[batch_id]["current_index"] = idx
-
-            try:
-                portal_url  = Config.get_portal_url(portal_key)
-                credentials = Config.get_credentials(portal_key)
-                PlaybookClass, platform = get_playbook_class(portal_url)
-
-                if not PlaybookClass:
-                    raise Exception(f"No playbook for platform '{platform}'")
-
-                with JOB_STORE_LOCK:
-                    JOB_STORE[run_id]["platform"] = platform
-
-                job = em.get_job(job_id)
-                if not job:
-                    raise Exception(f"Job '{job_id}' not found")
-
-                job_data = {
-                    "JobId":        job_id,
-                    "Title":        job["Title"],
-                    "Description":  job["Description"],
-                    "Location":     job.get("Location", ""),
-                    "City":         job.get("City", "Toronto"),
-                    "Salary":       job.get("Salary", ""),
-                    "HourlyRate":   job.get("HourlyRate", ""),
-                    "Duration":     "520 Hours (approximately 3 months)",
-                    "Requirements": job.get("Requirements", ""),
-                    "JobType":      job.get("JobType", "Internship"),
-                    "Industry":     job.get("Industry", "Technology"),
-                    "JobFunction":  job.get("JobFunction", ""),
-                    "StudentGroup": job.get("StudentGroup", "All Students"),
-                    "Department":   job.get("Department", ""),
-                    "portal_name":  portal_key,
-                }
-
-                playbook = PlaybookClass(
-                    portal_url=portal_url,
-                    credentials=credentials,
-                    job_data=job_data,
-                )
-                playbook.run_id = run_id
-                playbook.execute()
-
-                # Wait for UI confirm
-                print(f"[BATCH] Job {idx+1}/{len(batch_jobs)} filled -- waiting for UI confirm")
-                while True:
-                    time.sleep(2)
-                    with JOB_STORE_LOCK:
-                        s = JOB_STORE[run_id]["status"]
-                    if s in ("completed", "failed"):
-                        break
-
-                with BATCH_STORE_LOCK:
+                if p_status == "POSTED":
                     BATCH_STORE[batch_id]["completed"] += 1
-
-                print(f"[BATCH] Job {idx+1}/{len(batch_jobs)} done: {portal_key}/{job_id}")
-
-            except Exception as e:
-                with JOB_STORE_LOCK:
-                    JOB_STORE[run_id]["status"]      = "failed"
-                    JOB_STORE[run_id]["message"]     = str(e)
-                    JOB_STORE[run_id]["finished_at"] = datetime.now().isoformat()
-                with BATCH_STORE_LOCK:
+                else:
                     BATCH_STORE[batch_id]["failed"] += 1
-                print(f"[BATCH] Job {idx+1} failed: {e}")
+
+            print(f"[BATCH] Worker {idx+1}/{len(batch_jobs)} done: {portal_key}/{job_id} -> {p_status}")
+
+        except Exception as e:
+            with JOB_STORE_LOCK:
+                JOB_STORE[run_id]["status"]      = "failed"
+                JOB_STORE[run_id]["message"]     = str(e)
+                JOB_STORE[run_id]["finished_at"] = datetime.now().isoformat()
+            with BATCH_STORE_LOCK:
+                BATCH_STORE[batch_id]["failed"] += 1
+            print(f"[BATCH] Worker {idx+1} failed: {e}")
+
+    def run_batch():
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {
+                executor.submit(run_single, item, idx): idx
+                for idx, item in enumerate(batch_jobs)
+            }
+            for future in as_completed(futures):
+                future.result()
 
         with BATCH_STORE_LOCK:
             BATCH_STORE[batch_id]["status"] = "completed"

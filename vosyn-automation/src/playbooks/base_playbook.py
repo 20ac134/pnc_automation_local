@@ -8,7 +8,11 @@ import random
 from datetime import datetime
 from pathlib import Path
 from abc import ABC, abstractmethod
+import threading
+import tempfile
 
+
+_DRIVER_INIT_LOCK = threading.Lock()
 
 class BasePortalPlaybook(ABC):
   
@@ -24,7 +28,9 @@ class BasePortalPlaybook(ABC):
         self.run_id = None  # Set by API when running via frontend
 
     def setup_driver(self):
+        user_data_dir = tempfile.mkdtemp(prefix="uc_profile_")
         options = uc.ChromeOptions()
+        options.add_argument(f"--user-data-dir={user_data_dir}")
             
         width = random.randint(1200, 1920)
         height = random.randint(800, 1080)
@@ -32,8 +38,9 @@ class BasePortalPlaybook(ABC):
         
         prefs = {"profile.default_content_setting_values.notifications": 2}
         options.add_experimental_option("prefs", prefs)
-        
-        self.driver = uc.Chrome(options=options, version_main=147)
+        with _DRIVER_INIT_LOCK:
+
+            self.driver = uc.Chrome(options=options, version_main=147)
         
         self.wait = WebDriverWait(self.driver, 15)
         
@@ -50,22 +57,7 @@ class BasePortalPlaybook(ABC):
             element.send_keys(char)
             time.sleep(random.uniform(min_delay, max_delay))
 
-    def capture_screenshot(self, suffix: str = "") -> str:
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        job_id = self.job_data.get('JobId', 'unknown')
-        portal_name = self.job_data.get('portal_name', 'unknown')
-        
-        if suffix:
-            filename = f"proof_{job_id}_{portal_name}_{suffix}_{timestamp}.png"
-        else:
-            filename = f"proof_{job_id}_{portal_name}_{timestamp}.png"
-        
-        filepath = self.screenshot_dir / filename
-        
-        self.driver.save_screenshot(str(filepath))
-        
-        print(f"Screenshot saved: {filepath}")
-        return str(filepath)
+   
 
     @abstractmethod
     def login(self):
@@ -126,18 +118,8 @@ class BasePortalPlaybook(ABC):
             print("FAILED!")
             print(f"Error: {str(e)}")
             print("=" * 60)
-            
-            error_screenshot = None
-            try:
-                error_screenshot = self.capture_screenshot('error')
-            except:
-                pass
-            
-            return {
-                'status': 'FAILED',
-                'error': str(e),
-                'screenshot_path': error_screenshot
-            }
+    
+    
         
         finally:
             if self.driver:
@@ -178,11 +160,9 @@ if __name__ == "__main__":
             self.human_delay(1, 2)
         
         def submit_and_capture_proof(self):
-            print("  → Capturing proof")
-            screenshot = self.capture_screenshot('test_success')
+            print (" -> Done")
             return {
-                'confirmation_id': 'TEST_12345',
-                'screenshot_path': screenshot
+                'confirmation_id': "TEST_12345",
             }
     
     print("=" * 60)
@@ -215,7 +195,5 @@ if __name__ == "__main__":
     print("\nResult:")
     print(f"Status: {result['status']}")
     print(f"Confirmation ID: {result.get('confirmation_id')}")
-    print(f"Screenshot: {result.get('screenshot_path')}")
     print()
     print("Base playbook test complete!")
-    print("Check the screenshots/ folder for the test screenshot")

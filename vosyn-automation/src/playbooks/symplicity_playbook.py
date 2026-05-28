@@ -12,6 +12,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import Select
 from selenium.webdriver.support import expected_conditions as EC
+
+import sys
 import time
 
 
@@ -802,13 +804,15 @@ class SymplicityPlaybook(BasePortalPlaybook):
 
         print("FORM FILLED - waiting for review...")
 
-        # If running from API with a run_id, wait for UI confirm
-        # If running from terminal, wait for Enter
-        import sys
-        import time
+      
+        # Batch mode: no human confirm — return immediately, completion
+        # is driven by execute()'s return value in api.py
+        if getattr(self, "batch_mode", False):
+            print("FORM FILLED (batch mode - no confirm)")
+            return {'confirmation_id': 'NOT_SUBMITTED'}
 
+        # Single mode (API): wait for UI confirm
         if self.run_id:
-            # API mode — poll JOB_STORE for confirm
             from src.API.api import JOB_STORE, JOB_STORE_LOCK
             while True:
                 time.sleep(2)
@@ -817,6 +821,7 @@ class SymplicityPlaybook(BasePortalPlaybook):
                 if status in ("completed", "failed"):
                     print("Confirmed via UI — closing browser")
                     break
+        # Terminal mode: wait for Enter
         elif sys.stdin and sys.stdin.isatty():
             print("Press Enter when done reviewing")
             input()
@@ -824,6 +829,8 @@ class SymplicityPlaybook(BasePortalPlaybook):
             time.sleep(300)
 
         return {'confirmation_id': 'NOT_SUBMITTED'}
+
+
 
 #  MAIN 
 
