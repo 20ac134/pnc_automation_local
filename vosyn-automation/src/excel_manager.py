@@ -1,18 +1,44 @@
 import pandas as pd
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 import uuid
+import threading
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 EXCEL_PATH = DATA_DIR / "job_queue.xlsx"
+TRACKING_PATH = DATA_DIR / "application_tracking.xlsx"
+TRACKING_SHEET = "ApplicationTracking"
+TRACKING_COLUMNS = [
+    "TrackingId",
+    "JobId",
+    "JobTitle",
+    "PortalName",
+    "PortalDisplayName",
+    "PortalPostingId",
+    "PostingStatus",
+    "ApplicantsCount",
+    "LastApplicantsCount",
+    "NewApplicantsCount",
+    "PostedAt",
+    "LastCheckedAt",
+    "ProofLink",
+    "Notes",
+    "LastRunId",
+    "BatchId",
+    "CreatedAt",
+    "UpdatedAt",
+]
+
+_EXCEL_LOCK = threading.RLock()
 
 class ExcelManager:
 #Manages job queue stored in Excel file
     
-    def __init__(self, excel_path: Path | str = EXCEL_PATH):
+    def __init__(self, excel_path: Path | str = EXCEL_PATH, tracking_path: Path | str = TRACKING_PATH):
         self.excel_path = Path(excel_path)
+        self.tracking_path = Path(tracking_path)
         
         if not self.excel_path.exists():
             raise FileNotFoundError(
@@ -128,6 +154,187 @@ class ExcelManager:
         
         self._write_sheet(df, 'PostingRuns')
 
+    def record_application_posting(
+        self,
+        job_id: str,
+        job_title: str,
+        portal_name: str,
+        portal_display_name: str = "",
+        portal_posting_id: str = None,
+        proof_link: str = None,
+        posting_status: str = "POSTED",
+        applicants_count: int = 0,
+        notes: str = None,
+        run_id: str = None,
+        batch_id: str = None,
+        posted_at: str | datetime = None,
+    ) -> Dict[str, Any]:
+        """Create or update an application tracking row for a posted job."""
+        with _EXCEL_LOCK:
+            df = self._read_tracking_sheet()
+            now = pd.Timestamp.now().floor("s")
+            existing_idx = self._find_tracking_index_by_run_id(df, run_id)
+
+            if existing_idx is not None:
+                df.loc[existing_idx, "PostingStatus"] = posting_status
+                df.loc[existing_idx, "UpdatedAt"] = now
+                if portal_posting_id:
+                    df.loc[existing_idx, "PortalPostingId"] = portal_posting_id
+                if proof_link:
+                    df.loc[existing_idx, "ProofLink"] = proof_link
+                if notes:
+                    df.loc[existing_idx, "Notes"] = notes
+                self._write_tracking_sheet(df)
+                return self._clean_record(df.loc[existing_idx].to_dict())
+
+            applicant_total = self._safe_int(applicants_count)
+            posted_timestamp = self._parse_timestamp(posted_at) or now
+            last_checked = now if applicant_total > 0 else None
+            tracking_id = f"TRACK_{uuid.uuid4().hex[:10].upper()}"
+
+            row = {
+                "TrackingId": tracking_id,
+                "JobId": str(job_id),
+                "JobTitle": str(job_title or job_id),
+                "PortalName": str(portal_name).strip().lower(),
+                "PortalDisplayName": str(portal_display_name or portal_name),
+                "PortalPostingId": str(portal_posting_id) if portal_posting_id else "",
+                "PostingStatus": str(posting_status or "POSTED").upper(),
+                "ApplicantsCount": applicant_total,
+                "LastApplicantsCount": 0,
+                "NewApplicantsCount": applicant_total,
+                "PostedAt": posted_timestamp,
+                "LastCheckedAt": last_checked,
+                "ProofLink": proof_link or "",
+                "Notes": notes or "",
+                "LastRunId": run_id or "",
+                "BatchId": batch_id or "",
+                "CreatedAt": now,
+                "UpdatedAt": now,
+            }
+
+            df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+            df = self._normalize_tracking_df(df)
+            self._write_tracking_sheet(df)
+            return self._clean_record(row)
+
+    def get_application_tracking(
+        self,
+        job_id: str = None,
+        portal_name: str = None,
+        status: str = None,
+    ) -> List[Dict[str, Any]]:
+        """Return application tracking records, optionally filtered."""
+        df = self._read_tracking_sheet()
+        if df.empty:
+            return []
+
+        if job_id:
+            df = df[df["JobId"].astype(str) == str(job_id)]
+        if portal_name:
+            df = df[df["PortalName"].astype(str).str.lower() == str(portal_name).lower()]
+        if status:
+            df = df[df["PostingStatus"].astype(str).str.upper() == str(status).upper()]
+
+        if "PostedAt" in df.columns:
+            df = df.sort_values("PostedAt", ascending=False, na_position="last")
+
+        return [self._clean_record(row) for row in df.to_dict("records")]
+
+    def get_tracking_record(self, tracking_id: str) -> Optional[Dict[str, Any]]:
+        records = self.get_application_tracking()
+        for record in records:
+            if record.get("TrackingId") == tracking_id:
+                return record
+        return None
+
+    def update_applicant_count(
+        self,
+        applicants_count: int,
+        tracking_id: str = None,
+        job_id: str = None,
+        portal_name: str = None,
+        notes: str = None,
+        status: str = None,
+    ) -> Dict[str, Any]:
+        """Update applicant count for one tracking row."""
+        applicant_total = self._safe_int(applicants_count)
+        if applicant_total < 0:
+            raise ValueError("Applicants count cannot be negative")
+
+        with _EXCEL_LOCK:
+            df = self._read_tracking_sheet()
+            if df.empty:
+                raise ValueError("No application tracking records exist yet")
+
+            row_idx = self._find_tracking_index(df, tracking_id, job_id, portal_name)
+            if row_idx is None:
+                raise ValueError("Tracking record not found")
+
+            previous_total = self._safe_int(df.loc[row_idx, "ApplicantsCount"])
+            now = pd.Timestamp.now().floor("s")
+
+            df.loc[row_idx, "LastApplicantsCount"] = previous_total
+            df.loc[row_idx, "ApplicantsCount"] = applicant_total
+            df.loc[row_idx, "NewApplicantsCount"] = max(applicant_total - previous_total, 0)
+            df.loc[row_idx, "LastCheckedAt"] = now
+            df.loc[row_idx, "UpdatedAt"] = now
+
+            if notes is not None:
+                df.loc[row_idx, "Notes"] = notes
+            if status:
+                df.loc[row_idx, "PostingStatus"] = status.upper()
+
+            self._write_tracking_sheet(df)
+            return self._clean_record(df.loc[row_idx].to_dict())
+
+    def get_tracking_summary(self) -> Dict[str, Any]:
+        """Return totals for postings and applicants by job and portal."""
+        df = self._read_tracking_sheet()
+        if df.empty:
+            return {
+                "total_postings": 0,
+                "total_applicants": 0,
+                "jobs_tracked": 0,
+                "portals_tracked": 0,
+                "by_status": [],
+                "by_job": [],
+                "by_portal": [],
+            }
+
+        df["ApplicantsCount"] = pd.to_numeric(df["ApplicantsCount"], errors="coerce").fillna(0).astype(int)
+
+        by_status = (
+            df.groupby("PostingStatus", dropna=False)
+            .size()
+            .reset_index(name="postings")
+            .sort_values("postings", ascending=False)
+        )
+
+        by_job = (
+            df.groupby(["JobId", "JobTitle"], dropna=False)
+            .agg(postings=("TrackingId", "count"), applicants=("ApplicantsCount", "sum"))
+            .reset_index()
+            .sort_values(["applicants", "postings"], ascending=False)
+        )
+
+        by_portal = (
+            df.groupby(["PortalName", "PortalDisplayName"], dropna=False)
+            .agg(postings=("TrackingId", "count"), applicants=("ApplicantsCount", "sum"))
+            .reset_index()
+            .sort_values(["applicants", "postings"], ascending=False)
+        )
+
+        return {
+            "total_postings": int(len(df)),
+            "total_applicants": int(df["ApplicantsCount"].sum()),
+            "jobs_tracked": int(df["JobId"].nunique()),
+            "portals_tracked": int(df["PortalName"].nunique()),
+            "by_status": [self._clean_record(row) for row in by_status.to_dict("records")],
+            "by_job": [self._clean_record(row) for row in by_job.to_dict("records")],
+            "by_portal": [self._clean_record(row) for row in by_portal.to_dict("records")],
+        }
+
     def transition_run_status(
         self,
         run_id: str,
@@ -213,19 +420,117 @@ class ExcelManager:
     def _write_sheet(self, df: pd.DataFrame, sheet_name: str):
         self.excel_path.parent.mkdir(parents=True, exist_ok=True)
 
-        mode = "a" if self.excel_path.exists() else "w"
+        with _EXCEL_LOCK:
+            mode = "a" if self.excel_path.exists() else "w"
 
-        if mode == "a":
-            with pd.ExcelWriter(
-                self.excel_path,
-                engine="openpyxl",
-                mode="a",
-                if_sheet_exists="replace",
-            ) as writer:
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
+            if mode == "a":
+                with pd.ExcelWriter(
+                    self.excel_path,
+                    engine="openpyxl",
+                    mode="a",
+                    if_sheet_exists="replace",
+                ) as writer:
+                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+            else:
+                with pd.ExcelWriter(self.excel_path, engine="openpyxl", mode="w") as writer:
+                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+    def _read_tracking_sheet(self) -> pd.DataFrame:
+        if not self.tracking_path.exists():
+            return self._normalize_tracking_df(pd.DataFrame(columns=TRACKING_COLUMNS))
+
+        try:
+            df = pd.read_excel(self.tracking_path, sheet_name=TRACKING_SHEET)
+        except ValueError:
+            df = pd.DataFrame(columns=TRACKING_COLUMNS)
+        return self._normalize_tracking_df(df)
+
+    def _write_tracking_sheet(self, df: pd.DataFrame):
+        self.tracking_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with _EXCEL_LOCK:
+            with pd.ExcelWriter(self.tracking_path, engine="openpyxl", mode="w") as writer:
+                df.to_excel(writer, sheet_name=TRACKING_SHEET, index=False)
+
+    def _normalize_tracking_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        for col in TRACKING_COLUMNS:
+            if col not in df.columns:
+                df[col] = None
+
+        ordered_columns = TRACKING_COLUMNS + [col for col in df.columns if col not in TRACKING_COLUMNS]
+        df = df[ordered_columns]
+
+        for col in ["ApplicantsCount", "LastApplicantsCount", "NewApplicantsCount"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+
+        for col in ["PostedAt", "LastCheckedAt", "CreatedAt", "UpdatedAt"]:
+            df[col] = pd.to_datetime(df[col], errors="coerce").dt.floor("s")
+
+        return df
+
+    def _find_tracking_index_by_run_id(self, df: pd.DataFrame, run_id: str = None) -> Optional[int]:
+        if not run_id or df.empty:
+            return None
+
+        matches = df[df["LastRunId"].astype(str) == str(run_id)]
+        if matches.empty:
+            return None
+        return int(matches.index[-1])
+
+    def _find_tracking_index(
+        self,
+        df: pd.DataFrame,
+        tracking_id: str = None,
+        job_id: str = None,
+        portal_name: str = None,
+    ) -> Optional[int]:
+        if tracking_id:
+            matches = df[df["TrackingId"].astype(str) == str(tracking_id)]
+        elif job_id and portal_name:
+            matches = df[
+                (df["JobId"].astype(str) == str(job_id))
+                & (df["PortalName"].astype(str).str.lower() == str(portal_name).lower())
+            ]
         else:
-            with pd.ExcelWriter(self.excel_path, engine="openpyxl", mode="w") as writer:
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
+            raise ValueError("Provide tracking_id or both job_id and portal_name")
+
+        if matches.empty:
+            return None
+        return int(matches.index[-1])
+
+    @staticmethod
+    def _safe_int(value: Any) -> int:
+        if value is None or pd.isna(value):
+            return 0
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _parse_timestamp(value: str | datetime = None):
+        if value is None or value == "":
+            return None
+        parsed = pd.to_datetime(value, errors="coerce")
+        if pd.isna(parsed):
+            return None
+        return parsed.floor("s")
+
+    @staticmethod
+    def _clean_record(record: Dict[str, Any]) -> Dict[str, Any]:
+        cleaned = {}
+        for key, value in record.items():
+            if isinstance(value, pd.Timestamp):
+                cleaned[key] = None if pd.isna(value) else value.isoformat()
+            elif isinstance(value, datetime):
+                cleaned[key] = value.isoformat()
+            elif value is None or pd.isna(value):
+                cleaned[key] = None
+            elif hasattr(value, "item"):
+                cleaned[key] = value.item()
+            else:
+                cleaned[key] = value
+        return cleaned
 
     def _get_portal_url(self, portal_name: str) -> str:
         portal_urls = {

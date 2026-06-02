@@ -31,8 +31,8 @@ app.add_middleware(
 )
 
 # -- File paths
-EXCEL_PATH = Path(r"C:\Users\aritr\vosyn\vosyn-automation\data\job_queue.xlsx")
-PORTAL_URLS_PATH = Path(r"C:\Users\aritr\vosyn\vosyn-automation\data\portal_urls.xlsx")
+EXCEL_PATH = Path(r"C:\Users\alvin\Desktop\Vosyn\Pnc_automation\vosyn-automation\data\job_queue.xlsx")
+PORTAL_URLS_PATH = Path(r"C:\Users\alvin\Desktop\Vosyn\Pnc_automation\vosyn-automation\data\portal_urls.xlsx")
 
 # -- In-memory job status store
 JOB_STORE: dict[str, dict] = {}
@@ -83,10 +83,73 @@ def get_portal_countries() -> dict[str, str]:
     return result
 
 
+def record_tracking_for_run(run_id: str, posting_status: str = "POSTED", result: dict | None = None):
+    """Persist application tracking for a run that reached a posted/confirmed state."""
+    result = result or {}
+    with JOB_STORE_LOCK:
+        run = JOB_STORE.get(run_id)
+        if not run:
+            return None
+        run_snapshot = dict(run)
+
+    confirmation_id = result.get("confirmation_id")
+    if confirmation_id == "NOT_SUBMITTED":
+        confirmation_id = None
+
+    record = ExcelManager().record_application_posting(
+        job_id=run_snapshot.get("job_id", ""),
+        job_title=run_snapshot.get("job_title", ""),
+        portal_name=run_snapshot.get("portal_key") or run_snapshot.get("portal", ""),
+        portal_display_name=run_snapshot.get("portal", ""),
+        portal_posting_id=confirmation_id,
+        proof_link=result.get("screenshot_path"),
+        posting_status=posting_status,
+        run_id=run_id,
+        batch_id=run_snapshot.get("batch_id"),
+    )
+
+    with JOB_STORE_LOCK:
+        if run_id in JOB_STORE:
+            JOB_STORE[run_id]["tracking_id"] = record.get("TrackingId")
+            JOB_STORE[run_id]["tracking_recorded"] = True
+
+    return record
+
+
+def safe_record_tracking_for_run(run_id: str, posting_status: str = "POSTED", result: dict | None = None):
+    try:
+        return record_tracking_for_run(run_id, posting_status, result)
+    except Exception as e:
+        print(f"[TRACKING] Failed to record tracking for run {run_id}: {e}")
+        return None
+
+
 # -- Models
 class SubmitRequest(BaseModel):
     portal_key: str
     job_id: str
+
+
+class TrackingCreateRequest(BaseModel):
+    job_id: str
+    portal_name: str
+    job_title: str | None = None
+    portal_display_name: str | None = None
+    portal_posting_id: str | None = None
+    posting_status: str = "POSTED"
+    applicants_count: int = 0
+    proof_link: str | None = None
+    notes: str | None = None
+    posted_at: str | None = None
+
+
+class ApplicantCountUpdateRequest(BaseModel):
+    applicants_count: int
+    tracking_id: str | None = None
+    job_id: str | None = None
+    portal_name: str | None = None
+    notes: str | None = None
+    status: str | None = None
 
 
 # -- Endpoints
@@ -199,6 +262,7 @@ def submit_application(payload: SubmitRequest, background_tasks: BackgroundTasks
         with JOB_STORE_LOCK:
             JOB_STORE[run_id] = {
                 "status":      "running",
+                "portal_key":  payload.portal_key,
                 "portal":      display_names.get(payload.portal_key, payload.portal_key),
                 "job_id":      payload.job_id,
                 "job_title":   job["Title"],
@@ -215,13 +279,19 @@ def submit_application(payload: SubmitRequest, background_tasks: BackgroundTasks
                     credentials=credentials,
                     job_data=job_data,
                 )
-                result = playbook.execute()
                 playbook.run_id = run_id
+                result = playbook.execute()
                 p_status = result.get("status", "completed")
+                if p_status == "POSTED":
+                    tracking_record = safe_record_tracking_for_run(run_id, "POSTED", result)
+                else:
+                    tracking_record = None
                 with JOB_STORE_LOCK:
-                    JOB_STORE[run_id]["status"]      = "completed" if p_status == "success" else p_status
+                    JOB_STORE[run_id]["status"]      = "completed" if p_status in ("success", "POSTED") else p_status
                     JOB_STORE[run_id]["message"]     = f"Playbook finished: {p_status}"
                     JOB_STORE[run_id]["finished_at"] = datetime.now().isoformat()
+                    if tracking_record:
+                        JOB_STORE[run_id]["tracking_id"] = tracking_record.get("TrackingId")
                 print(f"[API] run {payload.portal_key}/{payload.job_id} -> {p_status}")
             except Exception as e:
                 with JOB_STORE_LOCK:
@@ -269,8 +339,14 @@ def confirm_run(run_id: str):
         JOB_STORE[run_id]["message"]     = "Manually confirmed via UI"
         JOB_STORE[run_id]["finished_at"] = datetime.now().isoformat()
 
+    tracking_record = safe_record_tracking_for_run(run_id, "POSTED")
+
     print(f"[API] Run {run_id} manually confirmed")
-    return {"status": "completed", "run_id": run_id}
+    return {
+        "status": "completed",
+        "run_id": run_id,
+        "tracking_id": tracking_record.get("TrackingId") if tracking_record else None,
+    }
 
 
 @app.get("/api/health")
@@ -283,12 +359,90 @@ def debug():
     import openpyxl
     wb = openpyxl.load_workbook(EXCEL_PATH)
     portal_df = read_portal_urls()
+    em = ExcelManager()
     return {
         "sheets": wb.sheetnames,
         "job_queue_path": str(EXCEL_PATH),
         "portal_urls_path": str(PORTAL_URLS_PATH),
+        "application_tracking_path": str(em.tracking_path),
         "total_portals": len(portal_df),
     }
+
+
+@app.get("/api/tracking")
+def get_tracking(job_id: str | None = None, portal_name: str | None = None, status: str | None = None):
+    """Return application tracking rows with optional filters."""
+    try:
+        return ExcelManager().get_application_tracking(
+            job_id=job_id,
+            portal_name=portal_name,
+            status=status,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/tracking")
+def create_tracking_record(payload: TrackingCreateRequest):
+    """Manually create an application tracking row."""
+    try:
+        job_title = payload.job_title
+        if not job_title:
+            job = ExcelManager().get_job(payload.job_id)
+            job_title = str(job.get("Title", payload.job_id)) if job else payload.job_id
+
+        return ExcelManager().record_application_posting(
+            job_id=payload.job_id,
+            job_title=job_title,
+            portal_name=payload.portal_name,
+            portal_display_name=payload.portal_display_name or payload.portal_name,
+            portal_posting_id=payload.portal_posting_id,
+            proof_link=payload.proof_link,
+            posting_status=payload.posting_status,
+            applicants_count=payload.applicants_count,
+            notes=payload.notes,
+            posted_at=payload.posted_at,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/tracking/summary")
+def get_tracking_summary():
+    """Return total postings/applicants grouped by job, portal, and status."""
+    try:
+        return ExcelManager().get_tracking_summary()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/tracking/applicants")
+def update_tracking_applicants(payload: ApplicantCountUpdateRequest):
+    """Update applicant count for a tracking row."""
+    try:
+        return ExcelManager().update_applicant_count(
+            applicants_count=payload.applicants_count,
+            tracking_id=payload.tracking_id,
+            job_id=payload.job_id,
+            portal_name=payload.portal_name,
+            notes=payload.notes,
+            status=payload.status,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/tracking/{tracking_id}")
+def get_tracking_record(tracking_id: str):
+    """Return one application tracking row."""
+    record = ExcelManager().get_tracking_record(tracking_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Tracking record '{tracking_id}' not found")
+    return record
+
+
 # -- Batch Models
 class BatchJobItem(BaseModel):
     portal_key: str
@@ -329,6 +483,7 @@ def submit_batch(payload: BatchSubmitRequest, background_tasks: BackgroundTasks)
         with JOB_STORE_LOCK:
             JOB_STORE[run_id] = {
                 "status":      "pending",
+                "portal_key":  v["portal_key"],
                 "portal":      display_names.get(v["portal_key"], v["portal_key"]),
                 "job_id":      v["job_id"],
                 "job_title":   v["job_title"],
@@ -404,12 +559,17 @@ def submit_batch(payload: BatchSubmitRequest, background_tasks: BackgroundTasks)
             playbook.batch_mode = True
             result = playbook.execute()
             p_status = result.get("status", "FAILED")
+            tracking_record = None
+            if p_status == "POSTED":
+                tracking_record = safe_record_tracking_for_run(run_id, "FORM_FILLED", result)
         
 
             with JOB_STORE_LOCK:
                 if p_status == "POSTED":
                     JOB_STORE[run_id]["status"] = "completed"
                     JOB_STORE[run_id]["message"] = "Form filled successfully"
+                    if tracking_record:
+                        JOB_STORE[run_id]["tracking_id"] = tracking_record.get("TrackingId")
                 else:
                     JOB_STORE[run_id]["status"] = "failed"
                     JOB_STORE[run_id]["message"] = result.get("error","UNKNOWN_ERROR" )
