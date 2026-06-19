@@ -1,5 +1,5 @@
 import pandas as pd
-from datetime import datetime
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 import uuid
@@ -12,23 +12,31 @@ TRACKING_PATH = DATA_DIR / "application_tracking.xlsx"
 TRACKING_SHEET = "ApplicationTracking"
 TRACKING_COLUMNS = [
     "TrackingId",
+    "UniversityJobId",
     "JobId",
     "JobTitle",
     "PortalName",
-    "PortalDisplayName",
-    "PortalPostingId",
+    "University",
+    "Country",
     "PostingStatus",
     "ApplicantsCount",
     "LastApplicantsCount",
     "NewApplicantsCount",
+    "SubmittedDate",
+    "SubmittedTime",
+]
+LEGACY_TRACKING_COLUMNS = [
+    "PortalDisplayName",
+    "SubmittedAt",
     "PostedAt",
     "LastCheckedAt",
+    "CreatedAt",
+    "UpdatedAt",
+    "PortalPostingId",
     "ProofLink",
     "Notes",
     "LastRunId",
     "BatchId",
-    "CreatedAt",
-    "UpdatedAt",
 ]
 
 _EXCEL_LOCK = threading.RLock()
@@ -160,57 +168,33 @@ class ExcelManager:
         job_title: str,
         portal_name: str,
         portal_display_name: str = "",
-        portal_posting_id: str = None,
-        proof_link: str = None,
+        country: str = "",
+        university_job_id: str = "",
         posting_status: str = "POSTED",
         applicants_count: int = 0,
-        notes: str = None,
-        run_id: str = None,
-        batch_id: str = None,
-        posted_at: str | datetime = None,
+        submitted_at: str | datetime = None,
     ) -> Dict[str, Any]:
-        """Create or update an application tracking row for a posted job."""
+        """Create an application tracking row for a submitted job."""
         with _EXCEL_LOCK:
             df = self._read_tracking_sheet()
-            now = pd.Timestamp.now().floor("s")
-            existing_idx = self._find_tracking_index_by_run_id(df, run_id)
-
-            if existing_idx is not None:
-                df.loc[existing_idx, "PostingStatus"] = posting_status
-                df.loc[existing_idx, "UpdatedAt"] = now
-                if portal_posting_id:
-                    df.loc[existing_idx, "PortalPostingId"] = portal_posting_id
-                if proof_link:
-                    df.loc[existing_idx, "ProofLink"] = proof_link
-                if notes:
-                    df.loc[existing_idx, "Notes"] = notes
-                self._write_tracking_sheet(df)
-                return self._clean_record(df.loc[existing_idx].to_dict())
-
             applicant_total = self._safe_int(applicants_count)
-            posted_timestamp = self._parse_timestamp(posted_at) or now
-            last_checked = now if applicant_total > 0 else None
+            submitted_timestamp = self._parse_timestamp(submitted_at) or pd.Timestamp.now().floor("s")
             tracking_id = f"TRACK_{uuid.uuid4().hex[:10].upper()}"
 
             row = {
                 "TrackingId": tracking_id,
+                "UniversityJobId": str(university_job_id or ""),
                 "JobId": str(job_id),
                 "JobTitle": str(job_title or job_id),
                 "PortalName": str(portal_name).strip().lower(),
-                "PortalDisplayName": str(portal_display_name or portal_name),
-                "PortalPostingId": str(portal_posting_id) if portal_posting_id else "",
+                "University": str(portal_display_name or portal_name),
+                "Country": str(country or ""),
                 "PostingStatus": str(posting_status or "POSTED").upper(),
                 "ApplicantsCount": applicant_total,
                 "LastApplicantsCount": 0,
                 "NewApplicantsCount": applicant_total,
-                "PostedAt": posted_timestamp,
-                "LastCheckedAt": last_checked,
-                "ProofLink": proof_link or "",
-                "Notes": notes or "",
-                "LastRunId": run_id or "",
-                "BatchId": batch_id or "",
-                "CreatedAt": now,
-                "UpdatedAt": now,
+                "SubmittedDate": self._format_date_value(submitted_timestamp),
+                "SubmittedTime": self._format_time_value(submitted_timestamp),
             }
 
             df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
@@ -236,8 +220,13 @@ class ExcelManager:
         if status:
             df = df[df["PostingStatus"].astype(str).str.upper() == str(status).upper()]
 
-        if "PostedAt" in df.columns:
-            df = df.sort_values("PostedAt", ascending=False, na_position="last")
+        if "SubmittedDate" in df.columns:
+            sort_values = df.apply(self._submitted_sort_value, axis=1)
+            df = (
+                df.assign(_SubmittedSort=sort_values)
+                .sort_values("_SubmittedSort", ascending=False, na_position="last")
+                .drop(columns=["_SubmittedSort"])
+            )
 
         return [self._clean_record(row) for row in df.to_dict("records")]
 
@@ -254,7 +243,6 @@ class ExcelManager:
         tracking_id: str = None,
         job_id: str = None,
         portal_name: str = None,
-        notes: str = None,
         status: str = None,
     ) -> Dict[str, Any]:
         """Update applicant count for one tracking row."""
@@ -272,16 +260,11 @@ class ExcelManager:
                 raise ValueError("Tracking record not found")
 
             previous_total = self._safe_int(df.loc[row_idx, "ApplicantsCount"])
-            now = pd.Timestamp.now().floor("s")
 
             df.loc[row_idx, "LastApplicantsCount"] = previous_total
             df.loc[row_idx, "ApplicantsCount"] = applicant_total
             df.loc[row_idx, "NewApplicantsCount"] = max(applicant_total - previous_total, 0)
-            df.loc[row_idx, "LastCheckedAt"] = now
-            df.loc[row_idx, "UpdatedAt"] = now
 
-            if notes is not None:
-                df.loc[row_idx, "Notes"] = notes
             if status:
                 df.loc[row_idx, "PostingStatus"] = status.upper()
 
@@ -319,7 +302,7 @@ class ExcelManager:
         )
 
         by_portal = (
-            df.groupby(["PortalName", "PortalDisplayName"], dropna=False)
+            df.groupby(["PortalName", "University"], dropna=False)
             .agg(postings=("TrackingId", "count"), applicants=("ApplicantsCount", "sum"))
             .reset_index()
             .sort_values(["applicants", "postings"], ascending=False)
@@ -453,9 +436,40 @@ class ExcelManager:
                 df.to_excel(writer, sheet_name=TRACKING_SHEET, index=False)
 
     def _normalize_tracking_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        if "University" not in df.columns and "PortalDisplayName" in df.columns:
+            df["University"] = df["PortalDisplayName"]
+        elif "University" in df.columns and "PortalDisplayName" in df.columns:
+            df["University"] = df["University"].fillna(df["PortalDisplayName"])
+
+        source_timestamps = pd.Series([None] * len(df), index=df.index)
+        for col in ["SubmittedAt", "PostedAt"]:
+            if col in df.columns:
+                parsed_values = df[col].apply(self._parse_timestamp)
+                source_timestamps = source_timestamps.where(source_timestamps.notna(), parsed_values)
+
+        for col in ["SubmittedDate", "SubmittedTime"]:
+            if col not in df.columns:
+                df[col] = None
+
+        df["SubmittedDate"] = [
+            self._format_date_value(existing) or self._format_date_value(source_timestamps.loc[idx])
+            for idx, existing in df["SubmittedDate"].items()
+        ]
+        df["SubmittedTime"] = [
+            self._format_time_value(existing) or self._format_time_value(source_timestamps.loc[idx])
+            for idx, existing in df["SubmittedTime"].items()
+        ]
+
+        df = df.drop(columns=[col for col in LEGACY_TRACKING_COLUMNS if col in df.columns])
+
         for col in TRACKING_COLUMNS:
             if col not in df.columns:
                 df[col] = None
+
+        df["University"] = [
+            existing if not self._is_missing(existing) else portal_name
+            for existing, portal_name in zip(df["University"], df["PortalName"])
+        ]
 
         ordered_columns = TRACKING_COLUMNS + [col for col in df.columns if col not in TRACKING_COLUMNS]
         df = df[ordered_columns]
@@ -463,19 +477,10 @@ class ExcelManager:
         for col in ["ApplicantsCount", "LastApplicantsCount", "NewApplicantsCount"]:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
-        for col in ["PostedAt", "LastCheckedAt", "CreatedAt", "UpdatedAt"]:
-            df[col] = pd.to_datetime(df[col], errors="coerce").dt.floor("s")
+        df["SubmittedDate"] = df["SubmittedDate"].apply(self._format_date_value)
+        df["SubmittedTime"] = df["SubmittedTime"].apply(self._format_time_value)
 
         return df
-
-    def _find_tracking_index_by_run_id(self, df: pd.DataFrame, run_id: str = None) -> Optional[int]:
-        if not run_id or df.empty:
-            return None
-
-        matches = df[df["LastRunId"].astype(str) == str(run_id)]
-        if matches.empty:
-            return None
-        return int(matches.index[-1])
 
     def _find_tracking_index(
         self,
@@ -500,7 +505,7 @@ class ExcelManager:
 
     @staticmethod
     def _safe_int(value: Any) -> int:
-        if value is None or pd.isna(value):
+        if ExcelManager._is_missing(value):
             return 0
         try:
             return int(value)
@@ -509,12 +514,65 @@ class ExcelManager:
 
     @staticmethod
     def _parse_timestamp(value: str | datetime = None):
-        if value is None or value == "":
+        if ExcelManager._is_missing(value):
             return None
         parsed = pd.to_datetime(value, errors="coerce")
         if pd.isna(parsed):
             return None
+        parsed = pd.Timestamp(parsed)
+        if parsed.tzinfo is not None:
+            parsed = parsed.tz_convert(None)
         return parsed.floor("s")
+
+    @staticmethod
+    def _format_date_value(value: Any) -> Optional[str]:
+        if ExcelManager._is_missing(value):
+            return None
+        if isinstance(value, datetime):
+            return value.strftime("%Y-%m-%d")
+        if isinstance(value, date):
+            return value.strftime("%Y-%m-%d")
+
+        text = str(value).strip()
+        parsed = pd.to_datetime(text, errors="coerce")
+        if pd.isna(parsed):
+            return text
+        return pd.Timestamp(parsed).strftime("%Y-%m-%d")
+
+    @staticmethod
+    def _format_time_value(value: Any) -> Optional[str]:
+        if ExcelManager._is_missing(value):
+            return None
+        if isinstance(value, datetime):
+            return value.strftime("%H:%M:%S")
+        if isinstance(value, time):
+            return value.strftime("%H:%M:%S")
+
+        text = str(value).strip()
+        parsed = pd.to_datetime(text, errors="coerce")
+        if pd.isna(parsed):
+            return text
+        return pd.Timestamp(parsed).strftime("%H:%M:%S")
+
+    @staticmethod
+    def _submitted_sort_value(record: pd.Series):
+        submitted_date = record.get("SubmittedDate")
+        submitted_time = record.get("SubmittedTime")
+        if ExcelManager._is_missing(submitted_date):
+            return pd.NaT
+        time_part = "00:00:00" if ExcelManager._is_missing(submitted_time) else str(submitted_time).strip()
+        return ExcelManager._parse_timestamp(f"{submitted_date} {time_part}") or pd.NaT
+
+    @staticmethod
+    def _is_missing(value: Any) -> bool:
+        if value is None:
+            return True
+        try:
+            if pd.isna(value):
+                return True
+        except (TypeError, ValueError):
+            pass
+        return isinstance(value, str) and value.strip() == ""
 
     @staticmethod
     def _clean_record(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -524,7 +582,9 @@ class ExcelManager:
                 cleaned[key] = None if pd.isna(value) else value.isoformat()
             elif isinstance(value, datetime):
                 cleaned[key] = value.isoformat()
-            elif value is None or pd.isna(value):
+            elif isinstance(value, (date, time)):
+                cleaned[key] = value.isoformat()
+            elif ExcelManager._is_missing(value):
                 cleaned[key] = None
             elif hasattr(value, "item"):
                 cleaned[key] = value.item()

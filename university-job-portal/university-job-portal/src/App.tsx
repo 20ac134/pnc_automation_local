@@ -21,6 +21,7 @@ interface Submission {
 interface BatchQueueItem {
   portal_key: string;
   job_id: string;
+  countryName: string;
   universityName: string;
   jobTitle: string;
 }
@@ -247,14 +248,16 @@ const App: React.FC = () => {
     const countryObj = countries.find((c) => c.code === selectedCountry);
     const universityObj = universities.find((u) => u.id === selectedUniversity);
     const jobObj = jobPostings.find((j) => j.id === selectedJob);
-
-    setSubmitted({
+    const submittedAt = new Date().toISOString();
+    const submission = {
       country: countryObj?.name ?? selectedCountry,
       university: universityObj?.name ?? selectedUniversity,
       job: jobObj?.title ?? selectedJob,
       department: jobObj?.department ?? "",
       jobType: jobObj?.type ?? "",
-    });
+    };
+
+    setSubmitted(submission);
 
     setLoadingStep(0);
     setAppState("running");
@@ -267,6 +270,10 @@ const App: React.FC = () => {
         body: JSON.stringify({
           portal_key: selectedUniversity,
           job_id: selectedJob,
+          country: submission.country,
+          university_name: submission.university,
+          job_title: submission.job,
+          submitted_at: submittedAt,
         }),
       });
       if (!res.ok) {
@@ -303,6 +310,7 @@ const App: React.FC = () => {
   // ── Batch: add current selection to queue ─────────────────────────────
   const handleAddToBatch = () => {
     if (!canSubmit) return;
+    const countryObj = countries.find((c) => c.code === selectedCountry);
     const universityObj = universities.find((u) => u.id === selectedUniversity);
     const jobObj = jobPostings.find((j) => j.id === selectedJob);
 
@@ -317,6 +325,7 @@ const App: React.FC = () => {
       {
         portal_key: selectedUniversity,
         job_id: selectedJob,
+        countryName: countryObj?.name ?? selectedCountry,
         universityName: universityObj?.name ?? selectedUniversity,
         jobTitle: jobObj?.title ?? selectedJob,
       },
@@ -334,6 +343,8 @@ const App: React.FC = () => {
   const handleRunBatch = async () => {
     if (batchQueue.length === 0) return;
 
+    const submittedAt = new Date().toISOString();
+
     setLoadingStep(0);
     setAppState("running");
     setErrorMessage("");
@@ -348,6 +359,10 @@ const App: React.FC = () => {
           jobs: batchQueue.map((q) => ({
             portal_key: q.portal_key,
             job_id: q.job_id,
+            country: q.countryName,
+            university_name: q.universityName,
+            job_title: q.jobTitle,
+            submitted_at: submittedAt,
           })),
         }),
       });
